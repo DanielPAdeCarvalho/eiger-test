@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	blockSize = 1024
+	blockSize = 1024 // Define the size of the block to read from files, used for hashing and diff operations.
 )
 
+// DeltaCommand defines a structure for delta commands indicating how to transform the original file into the updated version.
 type DeltaCommand struct {
 	Command    string
 	Position   int
@@ -20,7 +21,8 @@ type DeltaCommand struct {
 	Data       []byte
 }
 
-// Separated filesystem operations from hashing logic
+// hashFileBlocks computes and returns a map of hash values to their corresponding block indices in the specified file.
+// This function facilitates identifying unique blocks and their positions for generating deltas.
 func hashFileBlocks(filePath string) (map[int][]int, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -60,6 +62,8 @@ func hashFileBlocks(filePath string) (map[int][]int, error) {
 	return hashes, nil
 }
 
+// ApplyDelta applies a series of delta commands to transform the original file into its updated version, resulting in a new output file.
+// It manages file seeking and writes based on the delta instructions, handling both copy and insert operations.
 func ApplyDelta(originalFilePath string, deltaCommands []DeltaCommand, outputFilePath string) error {
 	originalFile, err := os.Open(originalFilePath)
 	if err != nil {
@@ -108,6 +112,9 @@ func ApplyDelta(originalFilePath string, deltaCommands []DeltaCommand, outputFil
 	return nil
 }
 
+// GenerateDelta analyzes the differences between an original and an updated file,
+// producing a series of delta commands that describe how to transform the original file into the updated version.
+// This function leverages rolling hashing to efficiently identify matching blocks and generate appropriate commands.
 func GenerateDelta(originalFilePath, updatedFilePath string) ([]DeltaCommand, error) {
 	originalHashes, err := hashFileBlocks(originalFilePath)
 	if err != nil {
@@ -148,7 +155,6 @@ func GenerateDelta(originalFilePath, updatedFilePath string) ([]DeltaCommand, er
 
 		currentWindow.WriteByte(b)
 		if currentWindow.Len() > blockSize {
-			// This log helps understand when and why the oldest byte is discarded
 			_, _ = currentWindow.ReadByte()
 		}
 
