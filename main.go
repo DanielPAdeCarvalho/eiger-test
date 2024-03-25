@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"io"
+	"os"
 )
 
 const (
-	base     = 256       // Base value to use for hashing; 256 works well for binary files and text.
-	modPrime = 805306457 // A large prime number for modulo operation to avoid hash collisions.
+	base      = 256       // Base value to use for hashing; 256 works well for binary files and text.
+	modPrime  = 805306457 // A large prime number for modulo operation to avoid hash collisions.
+	blockSize = 1024      // Block size to use for reading files.
 )
 
 // RollingHash struct to keep track of the hash and the factors for rolling.
@@ -49,21 +53,55 @@ func (rh *RollingHash) GetHash() int {
 	return rh.hash
 }
 
-func main() {
-	// Example usage
-	windowSize := 4 // For demonstration, a small window size
-	rh := NewRollingHash(windowSize)
+func hashFileBlocks(filePath string) (map[int][]int, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
 
-	// Simulating adding bytes to the rolling hash
-	data := []byte{'a', 'b', 'c', 'd'}
-	for _, b := range data {
-		rh.AddByte(b)
+	hashes := make(map[int][]int) // Map of hash values to block indexes.
+	reader := bufio.NewReader(file)
+	buffer := make([]byte, blockSize)
+	index := 0
+
+	for {
+		bytesRead, err := reader.Read(buffer)
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
+		if bytesRead == 0 {
+			break
+		}
+
+		// Initialize a new RollingHash for each block.
+		rh := NewRollingHash(bytesRead) // Use bytesRead instead of blockSize for the last block which might be smaller.
+		for _, b := range buffer[:bytesRead] {
+			rh.AddByte(b)
+		}
+
+		hash := rh.GetHash()
+		// Store the hash along with its block index. If collisions are expected, you can append index to a slice.
+		if _, exists := hashes[hash]; !exists {
+			hashes[hash] = make([]int, 0)
+		}
+		hashes[hash] = append(hashes[hash], index)
+
+		index++
 	}
 
-	fmt.Printf("Initial hash: %d\n", rh.GetHash())
+	return hashes, nil
+}
 
-	// Now roll the window by removing 'a' and adding 'e'
-	rh.Roll(data[0], 'e')
+func main() {
+	filePath := "phrases.txt" // Update with file path for file
+	hashes, err := hashFileBlocks(filePath)
+	if err != nil {
+		fmt.Println("Error hashing file blocks:", err)
+		return
+	}
 
-	fmt.Printf("Rolled hash: %d\n", rh.GetHash())
+	for hash, indexes := range hashes {
+		fmt.Printf("Hash: %d, Blocks: %+v\n", hash, indexes)
+	}
 }
