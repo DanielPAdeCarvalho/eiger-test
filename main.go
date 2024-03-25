@@ -3,12 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
-	"strconv"
-	"strings"
 )
 
 const (
@@ -23,6 +20,12 @@ type RollingHash struct {
 	window int // Size of the window (number of bytes)
 	first  int // The value of the first byte in the window
 	baseN  int // base raised to the power of (window-1), modulo modPrime
+}
+type DeltaCommand struct {
+	Command    string
+	Position   int    // Position to insert or destination position for copy
+	BlockIndex int    // Used for copy commands to indicate the block index in the original file
+	Data       []byte // Used for insert commands to hold the binary data
 }
 
 // NewRollingHash initializes a new RollingHash for a given window size.
@@ -108,108 +111,80 @@ func hashFileBlocks(filePath string) (map[int][]int, error) {
 	return hashes, nil
 }
 
-func applyDelta(originalFilePath, deltaFilePath, outputFilePath string) error {
-	// Open the original and delta files
+func applyDelta(originalFilePath string, deltaCommands []DeltaCommand, outputFilePath string) error {
 	originalFile, err := os.Open(originalFilePath)
 	if err != nil {
 		return err
 	}
 	defer originalFile.Close()
 
-	deltaFile, err := os.Open(deltaFilePath)
-	if err != nil {
-		return err
-	}
-	defer deltaFile.Close()
-
-	// Create the output file
-	outputFile, err := os.Create(outputFilePath)
+	outputFile, err := os.OpenFile(outputFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
 	}
 	defer outputFile.Close()
 
-	// Read and apply each command from the delta file
-	scanner := bufio.NewScanner(deltaFile)
-	for scanner.Scan() {
-		command := scanner.Text()
-		if strings.HasPrefix(command, "copy block") {
-			// Parse the command to get block index and position
-			parts := strings.Split(command, " ")
-			blockIndex, err := strconv.Atoi(parts[2])
-			if err != nil {
-				return err
-			}
-			position, err := strconv.Atoi(parts[5])
-			if err != nil {
-				return err
-			}
+	for i, command := range deltaCommands {
+		fmt.Printf("Executing command #%d: %s\n", i, command.Command)
+		switch command.Command {
+		case "copy":
+			offset := int64(command.BlockIndex * blockSize)
+			fmt.Printf("Copy: Seeking to %d in original file (BlockIndex: %d)\n", offset, command.BlockIndex)
 
-			// Calculate the offset in the original file and seek to it
-			offset := int64(blockIndex * blockSize)
 			_, err = originalFile.Seek(offset, io.SeekStart)
 			if err != nil {
 				return err
 			}
 
-			// Copy the block from the original file to the output file
-			_, err = io.CopyN(outputFile, originalFile, blockSize)
+			outputFileSeek, err := outputFile.Seek(int64(command.Position), io.SeekStart)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Copy: Seeking to %d in output file (Command Position: %d)\n", outputFileSeek, command.Position)
+
+			copiedBytes, err := io.CopyN(outputFile, originalFile, blockSize)
 			if err != nil && err != io.EOF {
 				return err
 			}
+			fmt.Printf("Copy: Copied %d bytes from original to output\n", copiedBytes)
 
-			// Move the write position of the output file
-			_, err = outputFile.Seek(int64(position), io.SeekStart)
+		case "insert":
+			outputFileSeek, err := outputFile.Seek(int64(command.Position), io.SeekStart)
 			if err != nil {
 				return err
 			}
-		} else if strings.HasPrefix(command, "insert at position") {
-			// Parse the command to get position and data
-			insertCmdParts := strings.SplitN(command, ": ", 2)
-			positionPart := strings.Split(insertCmdParts[0], " ")
-			position, err := strconv.Atoi(positionPart[3])
-			if err != nil {
-				return err
-			}
+			fmt.Printf("Insert: Seeking to %d in output file (Command Position: %d)\n", outputFileSeek, command.Position)
 
-			data, err := hex.DecodeString(insertCmdParts[1])
+			writtenBytes, err := outputFile.Write(command.Data)
 			if err != nil {
 				return err
 			}
+			fmt.Printf("Insert: Wrote %d bytes to output file\n", writtenBytes)
 
-			// Move the write position of the output file and insert the data
-			_, err = outputFile.Seek(int64(position), io.SeekStart)
-			if err != nil {
-				return err
-			}
-			_, err = outputFile.Write(data)
-			if err != nil {
-				return err
-			}
+		default:
+			return fmt.Errorf("unknown command: %s", command.Command)
 		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return err
 	}
 
 	return nil
 }
 
-func generateDelta(originalFilePath, updatedFilePath string) ([]string, error) {
+func generateDelta(originalFilePath, updatedFilePath string) ([]DeltaCommand, error) {
 	originalHashes, err := hashFileBlocks(originalFilePath)
 	if err != nil {
+		fmt.Println("Error hashing original file blocks:", err)
 		return nil, err
 	}
 
 	updatedFile, err := os.Open(updatedFilePath)
 	if err != nil {
+		fmt.Println("Error opening updated file:", err)
 		return nil, err
 	}
 	defer updatedFile.Close()
 
 	reader := bufio.NewReader(updatedFile)
-	var delta []string
+	var delta []DeltaCommand
 	var currentWindow bytes.Buffer
 	position := 0
 
@@ -219,20 +194,26 @@ func generateDelta(originalFilePath, updatedFilePath string) ([]string, error) {
 			if err == io.EOF {
 				// Handle any remaining bytes in the window as inserts
 				if currentWindow.Len() > 0 {
-					hexData := hex.EncodeToString(currentWindow.Bytes())
-					delta = append(delta, fmt.Sprintf("insert at position %d: %s", position-currentWindow.Len(), hexData))
+					fmt.Printf("Insert command at EOF - Position: %d, Data Length: %d\n", position-currentWindow.Len(), currentWindow.Len())
+					delta = append(delta, DeltaCommand{
+						Command:  "insert",
+						Position: position - currentWindow.Len(),
+						Data:     currentWindow.Bytes(),
+					})
 				}
 				break
 			}
+			fmt.Println("Error reading byte from updated file:", err)
 			return nil, err
 		}
 
 		currentWindow.WriteByte(b)
 		if currentWindow.Len() > blockSize {
-			_, _ = currentWindow.ReadByte() // Discard the oldest byte to maintain window size
+			// This log helps understand when and why the oldest byte is discarded
+			fmt.Printf("Discarding oldest byte to maintain window size - Current Position: %d\n", position)
+			_, _ = currentWindow.ReadByte()
 		}
 
-		// Generate hash for the current window and compare with original file hashes
 		if currentWindow.Len() == blockSize {
 			rh := NewRollingHash(blockSize)
 			tempWindow := currentWindow.Bytes()
@@ -242,13 +223,17 @@ func generateDelta(originalFilePath, updatedFilePath string) ([]string, error) {
 
 			hash := rh.GetHash()
 			if indexes, exists := originalHashes[hash]; exists {
-				// Confirm the block truly matches to handle hash collisions
-				delta = append(delta, fmt.Sprintf("copy block %d to position %d", indexes[0], position+1-blockSize))
+				deltaPosition := position + 1 - blockSize
+				// Log the creation of a copy command, including the positions and block index involved
+				fmt.Printf("Copy command - Block Index: %d, Position: %d\n", indexes[0], deltaPosition)
+				delta = append(delta, DeltaCommand{
+					Command:    "copy",
+					BlockIndex: indexes[0],
+					Position:   deltaPosition,
+				})
 				currentWindow.Reset()
-				continue
 			}
 		}
-
 		position++
 	}
 
@@ -266,13 +251,12 @@ func main() {
 		return
 	}
 
-	fmt.Println("Delta commands:")
+	fmt.Println("Delta commands to be executed:")
 	for _, cmd := range delta {
 		fmt.Println(cmd)
 	}
 
-	if err := applyDelta(originalFilePath, "path/to/delta/commands", outputFilePath); err != nil {
+	if err := applyDelta(originalFilePath, delta, outputFilePath); err != nil {
 		fmt.Println("Error applying delta:", err)
 	}
-
 }
